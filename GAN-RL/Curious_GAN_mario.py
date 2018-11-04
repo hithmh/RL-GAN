@@ -138,7 +138,8 @@ if __name__ == '__main__':
     STATE_DIM = env.observation_space.shape
     ACTION_DIM = env.action_space.shape
     S = []
-
+    with tf.name_scope("S"):
+        S=tf.placeholder(tf.float32, shape=[None, *STATE_DIM], name="s")
     for i in range(TIME_STEP):
         with tf.name_scope("S_t-{}".format(i)):
             S.append(tf.placeholder(tf.float32, shape=[None, *STATE_DIM], name="s_t-{}".format(i)))
