@@ -157,6 +157,7 @@ if __name__ == '__main__':
     LR_C = 1e-4  # learning rate for critic
     GAMMA = 0.99  # reward discount
     l2_weight = 0.01
+    USE_BATCH_NORM = True
     REPLACE_ITER_A = 1100
     REPLACE_ITER_C = 1000
     ITER_train_G = 10
@@ -191,26 +192,32 @@ if __name__ == '__main__':
         S_ = tf.placeholder(tf.float32, shape=[None,TIME_STEP, *fshape, 1], name='s_')
     with tf.name_scope('A'):
         A = tf.placeholder(tf.float32, shape=[None, ACTION_DIM], name='a')
+    with tf.name_scope('Is_training'):
+        phi_is_training = tf.placeholder(tf.bool)
+        LSTM_is_trainig = tf.placeholder(tf.bool)
+        D_is_training = tf.placeholder(tf.bool)
+        G_is_training = tf.placeholder(tf.bool)
+        C_is_training = tf.placeholder(tf.bool)
+        A_is_training = tf.placeholder(tf.bool)
     with tf.variable_scope('LSTM_feature_abstraction'):
-        phis = universe_feature_abstraction(S,time_step=TIME_STEP, nConvs=2, is_traning=True)
-        phis_inf = universe_feature_abstraction(S, reuse=True, time_step=TIME_STEP, nConvs=2, is_traning=False)
-        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_traning=False)
-        observation = universe_feature_abstraction(single_S_, reuse=True,time_step=1, nConvs=2)
+        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_is_training)
+        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
+        observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
         observation = tf.squeeze(observation, 1)
-        LSTM_unit = LSTM_unit(phis, phis_, S, sess, 32, time_step=TIME_STEP)
+        LSTM_unit = LSTM_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=32, time_step=TIME_STEP)
 
-    actor = Actor(sess, ACTION_DIM, learning_rate=LR_A, t_replace_iter=REPLACE_ITER_A,
-                  LSTM_unit=LSTM_unit, S=S, S_=S_, batch_size=BATCH_SIZE)
+    actor = Actor(sess, ACTION_DIM,  LR_A, BATCH_SIZE, REPLACE_ITER_A, LSTM_unit, S, S_,
+                 phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope = 'Actor', action_bound = None)
 
-    critic = Critic(sess, ACTION_DIM, LR_C, BATCH_SIZE, GAMMA, REPLACE_ITER_C, actor.a, actor.a_,
-                    LSTM_unit, S=S, S_=S_, R=R)
+    critic = Critic(sess, ACTION_DIM, LR_C, BATCH_SIZE, GAMMA, REPLACE_ITER_C, actor.a, actor.a_, LSTM_unit, S, S_, R,
+                 phi_is_training, C_is_training, A_is_training, USE_BATCH_NORM)
 
     actor.add_grad_to_graph(critic.a_grads)
     M = Memory(capacity = MEMORY_CAPACITY)
-    generator = Generator(Learning_rate=LR_G, a=actor.a, S=S,LSTM_unit=LSTM_unit, action_dim=ACTION_DIM,
-                          sess=sess, phi_dim=observation.shape[-1].value, batch_a=A,batch_size = BATCH_SIZE, l2_regularizer_weight=l2_weight)
-    discriminator = Discriminator(G=generator.G, Learning_rate=LR_D, S=S, single_S_=single_S_, a=actor.a,
-                                  LSTM_unit=LSTM_unit, observation=observation, sess=sess,batch_size = BATCH_SIZE, l2_regularizer_weight=l2_weight)
+    generator = Generator(sess, ACTION_DIM,  LR_A, BATCH_SIZE, actor.a, S, LSTM_unit, observation.shape[-1], A,
+                 l2_weight, phi_is_training, G_is_training, A_is_training, D_is_training)
+    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, observation,
+                                  phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight)
     generator.model_loss(discriminator.D_logit_fake)
 
     saver = tf.train.Saver()
