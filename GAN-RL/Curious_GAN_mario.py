@@ -9,7 +9,7 @@ import ppaquette_gym_super_mario
 from ppaquette_gym_super_mario import wrappers
 import env_wrapper
 import multiprocessing
-
+test
 def train():
     var = 2.
     pointer = 0
@@ -48,38 +48,40 @@ def train():
             #               '| G loss: %f' % float(one_step_G_loss),
             #               )
 
-        lstm_state = LSTM_unit.get_initial_state()
+        D_lstm_state = LSTM_unit.get_initial_state()
+        G_lstm_state = gen_LSTM_unit.get_initial_state()
         env = gym.make(env_id)
         env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=False)
         s = env.reset()
         s = np.expand_dims(s, -1)
         for t in range(MAX_EP_STEPS):
-            a = actor.choose_action(s, lstm_state, var)
-            g = generator.predict(s, lstm_state, a)
+            a = actor.choose_action(s, D_lstm_state, var)
+            g = generator.predict(s, G_lstm_state, a)
             s_, r, done, info, _ = env._step(a)
             s_ = np.expand_dims(s_, -1)
-            curious_r = ITA * discriminator.determine(s, lstm_state, a, g)[0]
-            new_lstm_state = LSTM_unit.get_state(s, lstm_state)
+            curious_r = ITA * discriminator.determine(s, D_lstm_state, a, g)[0]
+            D_lstm_state_ = LSTM_unit.get_state(s, D_lstm_state)
+            G_lstm_state_ = gen_LSTM_unit.get_state(s, G_lstm_state)
             one_step_l_2_loss = discriminator.observe_and_compare(s_, g,)
             l_2_loss += one_step_l_2_loss
-            M.store_transition(s, lstm_state, a, r, curious_r, s_, new_lstm_state)
+            M.store_transition(s, D_lstm_state, G_lstm_state, a, r, curious_r, s_, D_lstm_state_, G_lstm_state_)
             if M.pointer > MEMORY_CAPACITY:
 
                 # for i in range(ITER_train_G):
                 #     b_s, b_a, b_r, b_curious_r, b_s_ = M.sample(BATCH_SIZE)
                 #     generator.learn(b_s, b_a)
-                b_s, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_ = M.sample(BATCH_SIZE)
+                b_s, b_D_lstm_s, b_G_lstm_s, b_a, b_r, b_curious_r, b_s_, b_D_lstm_s_, b_G_lstm_s_ = M.sample(BATCH_SIZE)
 
-                generator.learn(b_s, b_lstm_s, b_a)
-                b_g = generator.predict_batch(b_s, b_lstm_s, b_a)
-                discriminator.learn(b_g, b_s_, b_s, b_lstm_s, b_a)
+                generator.learn(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
+                b_g = generator.predict_batch(b_s, b_G_lstm_s, b_a)
+                discriminator.learn(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
                 # Learn the minibatch
                 # b_curious_r = discriminator.determine_batch(b_s, b_lstm_s, b_a, b_g)
-                critic.learn(b_s, b_lstm_s, b_a, b_curious_r, b_s_, b_lstm_s_)
-                actor.learn(b_s, b_lstm_s)
-                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_lstm_s, b_a)
+                critic.learn(b_s, b_D_lstm_s, b_a, b_curious_r, b_s_, b_D_lstm_s_)
+                actor.learn(b_s, b_D_lstm_s)
+                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
                 D_loss += one_step_D_loss
-                one_step_G_loss = generator.eval(b_s, b_lstm_s, b_a)
+                one_step_G_loss = generator.eval(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
                 G_loss += one_step_G_loss
                 if t % 10 == 0:
                     print('Ep:', ep,
@@ -90,7 +92,8 @@ def train():
                           '| G loss: %f' % float(one_step_G_loss),
                           )
             s = s_
-            lstm_state = new_lstm_state
+            D_lstm_state = D_lstm_state_
+            G_lstm_state = G_lstm_state_
             ep_reward += r
             ep_curious_reward += curious_r
     
@@ -194,17 +197,23 @@ if __name__ == '__main__':
         A = tf.placeholder(tf.float32, shape=[None, ACTION_DIM], name='a')
     with tf.name_scope('Is_training'):
         phi_is_training = tf.placeholder(tf.bool)
+        phi_gen_is_training = tf.placeholder(tf.bool)
         LSTM_is_trainig = tf.placeholder(tf.bool)
         D_is_training = tf.placeholder(tf.bool)
         G_is_training = tf.placeholder(tf.bool)
         C_is_training = tf.placeholder(tf.bool)
         A_is_training = tf.placeholder(tf.bool)
-    with tf.variable_scope('LSTM_feature_abstraction'):
+    with tf.variable_scope('D_feature_abstraction'):
         phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_is_training)
         phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
         observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
         observation = tf.squeeze(observation, 1)
-        LSTM_unit = LSTM_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=32, time_step=TIME_STEP)
+        LSTM_unit = lstm_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=32, time_step=TIME_STEP)
+
+    with tf.variable_scope('G_feature_abstraction'):
+        phis_generator = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_gen_is_training)
+        gen_LSTM_unit = lstm_unit(phis_generator, None, S, sess, phi_gen_is_training, n_lstm_unit=32,
+                                  time_step=TIME_STEP)
 
     actor = Actor(sess, ACTION_DIM,  LR_A, BATCH_SIZE, REPLACE_ITER_A, LSTM_unit, S, S_,
                  phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope = 'Actor', action_bound = None)
@@ -214,9 +223,9 @@ if __name__ == '__main__':
 
     actor.add_grad_to_graph(critic.a_grads)
     M = Memory(capacity = MEMORY_CAPACITY)
-    generator = Generator(sess, ACTION_DIM,  LR_A, BATCH_SIZE, actor.a, S, LSTM_unit, observation.shape[-1], A,
-                 l2_weight, phi_is_training, G_is_training, A_is_training, D_is_training)
-    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, observation,
+    generator = Generator(sess, ACTION_DIM,  LR_A, BATCH_SIZE, actor.a, S, gen_LSTM_unit, LSTM_unit, observation.shape[-1], A,
+                 l2_weight, phi_is_training, phi_gen_is_training, G_is_training, A_is_training, D_is_training)
+    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, gen_LSTM_unit, observation,
                                   phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight)
     generator.model_loss(discriminator.D_logit_fake)
 
