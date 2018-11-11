@@ -15,8 +15,6 @@ def train():
     pointer = 0
     # timestep_limit = env.spec.tags.get('wrapper_config.TimeLimit.max_episode_steps')
     # if timestep_limit is None: timestep_limit = env.spec.timestep_limit
-    J_D_loss = np.zeros((N_trials, len(N_vals)))
-    J_G_loss = np.zeros((N_trials, len(N_vals)))
     for ep in range(MAX_EPISODES):
 
         ep_reward = 0
@@ -24,20 +22,21 @@ def train():
         D_loss = 0
         G_loss = 0
         l_2_loss = 0
-        # if M.pointer > MEMORY_CAPACITY:
-            # for t in range(ITER_D_Training):
-            #     b_s, b_a, b_r, b_curious_r, b_s_ = M.sample(BATCH_SIZE)
-            #     generator.learn(b_s, b_a)
-            #     b_g = generator.predict_batch(b_s, b_a)
-            #     discriminator.learn(b_g, b_s_, b_s, b_a)
-            #     if t%10 ==0:
-            #         one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
-            #         one_step_G_loss = generator.eval(b_s, b_a)
-            #         print('Ep:', ep,
-            #               '|D Training Step:%i'% int(t),
-            #               '| D loss: %f' % float(one_step_D_loss),
-            #               '| G loss: %f' % float(one_step_G_loss),
-            #               )
+        if M.pointer > MEMORY_CAPACITY:
+            for t in range(ITER_D_Training):
+                b_s, b_g_old, b_D_lstm_s, b_G_lstm_s, b_a, b_r, b_curious_r, b_s_, b_D_lstm_s_, b_G_lstm_s_ = M.sample(BATCH_SIZE)
+
+                generator.learn(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
+                b_g = generator.predict_batch(b_s, b_G_lstm_s, b_a)
+                discriminator.learn(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
+                if t%10 ==0:
+                    one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
+                    one_step_G_loss = generator.eval(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
+                    print('Ep:', ep,
+                          '|D Training Step:%i'% int(t),
+                          '| D loss: %f' % float(one_step_D_loss),
+                          '| G loss: %f' % float(one_step_G_loss),
+                          )
             # # for t in range(ITER_G_Training):
             #     b_s, b_a, b_r, b_curious_r, b_s_ = M.sample(BATCH_SIZE)
             #
@@ -64,17 +63,17 @@ def train():
             G_lstm_state_ = gen_LSTM_unit.get_state(s, G_lstm_state)
             one_step_l_2_loss = discriminator.observe_and_compare(s_, g,)
             l_2_loss += one_step_l_2_loss
-            M.store_transition(s, D_lstm_state, G_lstm_state, a, r, curious_r, s_, D_lstm_state_, G_lstm_state_)
+            M.store_transition(s,g, D_lstm_state, G_lstm_state, a, r, curious_r, s_, D_lstm_state_, G_lstm_state_)
             if M.pointer > MEMORY_CAPACITY:
 
                 # for i in range(ITER_train_G):
                 #     b_s, b_a, b_r, b_curious_r, b_s_ = M.sample(BATCH_SIZE)
                 #     generator.learn(b_s, b_a)
-                b_s, b_D_lstm_s, b_G_lstm_s, b_a, b_r, b_curious_r, b_s_, b_D_lstm_s_, b_G_lstm_s_ = M.sample(BATCH_SIZE)
+                b_s, b_g_old, b_D_lstm_s, b_G_lstm_s, b_a, b_r, b_curious_r, b_s_, b_D_lstm_s_, b_G_lstm_s_ = M.sample(BATCH_SIZE)
 
-                generator.learn(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
+                # generator.learn(b_s, b_G_lstm_s, b_a, b_D_lstm_s)
                 b_g = generator.predict_batch(b_s, b_G_lstm_s, b_a)
-                discriminator.learn(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
+                # discriminator.learn(b_g, b_s_, b_s, b_D_lstm_s, b_a, b_G_lstm_s)
                 # Learn the minibatch
                 # b_curious_r = discriminator.determine_batch(b_s, b_lstm_s, b_a, b_g)
                 critic.learn(b_s, b_D_lstm_s, b_a, b_curious_r, b_s_, b_D_lstm_s_)
@@ -85,12 +84,15 @@ def train():
                 G_loss += one_step_G_loss
                 if t % 10 == 0:
                     print('Ep:', ep,
-                          '|Step:%i'% int(t),
+                          '|Step:%i' % int(t),
+                          '| R: %i' % int(ep_reward),
                           '| Curious_R: %f' % float(curious_r),
                           '| Prediction_error: %f' % float(one_step_l_2_loss),
-                          '| D loss: %f' % float(one_step_D_loss),
-                          '| G loss: %f' % float(one_step_G_loss),
-                          )
+
+
+                              '| D loss: %f' % float(one_step_D_loss),
+                              '| G loss: %f' % float(one_step_G_loss),
+                              )
             s = s_
             D_lstm_state = D_lstm_state_
             G_lstm_state = G_lstm_state_
@@ -131,6 +133,7 @@ def train():
     ckpt_path = os.path.join('./'+MODE[n_model], 'Curious_GAN.ckpt')
     save_path = saver.save(sess, ckpt_path, write_meta_graph=False)
     print("\nSave Model %s\n" % save_path)
+    np.save('J_r.npy', J_r)
 
 
 def eval():
@@ -143,6 +146,64 @@ def eval():
         s_, r, done = env.step(a)
         s = s_
 
+
+def build_model():
+    with tf.variable_scope('D_feature_abstraction'):
+        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_is_training)
+        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
+        observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
+        observation = tf.squeeze(observation, 1)
+        LSTM_unit = lstm_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=128, time_step=TIME_STEP)
+
+    with tf.variable_scope('G_feature_abstraction'):
+        phis_generator = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_gen_is_training)
+        gen_LSTM_unit = lstm_unit(phis_generator, None, S, sess, phi_gen_is_training, n_lstm_unit=128,
+                                  time_step=TIME_STEP)
+    actor = Actor(sess, ACTION_DIM, LR_A, BATCH_SIZE, REPLACE_ITER_A, LSTM_unit, S, S_,
+                  phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope='Actor', action_bound=None)
+
+    critic = Critic(sess, ACTION_DIM, LR_C, BATCH_SIZE, GAMMA, REPLACE_ITER_C, actor.a, actor.a_, LSTM_unit, S, S_, R,
+                    phi_is_training, C_is_training, A_is_training, USE_BATCH_NORM)
+
+    actor.add_grad_to_graph(critic.a_grads)
+    M = Memory(capacity=MEMORY_CAPACITY)
+    generator = Generator(sess, ACTION_DIM, LR_A, BATCH_SIZE, actor.a, S, gen_LSTM_unit, LSTM_unit,
+                          observation.shape[-1], A,
+                          l2_weight, phi_is_training, phi_gen_is_training, G_is_training, A_is_training, D_is_training)
+    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, gen_LSTM_unit, observation,
+                                  phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight)
+    generator.model_loss(discriminator.D_logit_fake)
+    return actor, critic, generator, discriminator, M, LSTM_unit, gen_LSTM_unit
+
+
+def build_full_generation_model():
+    with tf.variable_scope('D_feature_abstraction'):
+        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_is_training)
+        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
+        observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
+        observation = tf.squeeze(observation, 1)
+        LSTM_unit = lstm_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=128, time_step=TIME_STEP)
+
+    with tf.variable_scope('G_feature_abstraction'):
+        phis_generator = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_gen_is_training)
+        gen_LSTM_unit = lstm_unit(phis_generator, None, S, sess, phi_gen_is_training, n_lstm_unit=128,
+                                  time_step=TIME_STEP)
+    actor = Actor(sess, ACTION_DIM, LR_A, BATCH_SIZE, REPLACE_ITER_A, LSTM_unit, S, S_,
+                  phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope='Actor', action_bound=None)
+
+    critic = Critic(sess, ACTION_DIM, LR_C, BATCH_SIZE, GAMMA, REPLACE_ITER_C, actor.a, actor.a_, LSTM_unit, S, S_, R,
+                    phi_is_training, C_is_training, A_is_training, USE_BATCH_NORM)
+
+    actor.add_grad_to_graph(critic.a_grads)
+    M = Memory(capacity=MEMORY_CAPACITY)
+    generator = Generator(sess, ACTION_DIM, LR_A, BATCH_SIZE, actor.a, S, gen_LSTM_unit, LSTM_unit,
+                          observation.shape[-1], A,
+                          l2_weight, phi_is_training, phi_gen_is_training, G_is_training, A_is_training, D_is_training)
+    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, gen_LSTM_unit, observation,
+                                  phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight)
+    generator.model_loss(discriminator.D_logit_fake)
+    return actor, critic, generator, discriminator, M, LSTM_unit, gen_LSTM_unit
+
 if __name__ == '__main__':
     env_id = 'ppaquette/SuperMarioBros-1-1-v0'
 
@@ -153,7 +214,7 @@ if __name__ == '__main__':
     fshape = (42, 42)
     TIME_STEP = 4
     MAX_EPISODES = 100
-    MAX_EP_STEPS = 5000
+    MAX_EP_STEPS = 2000
     LR_D = 1e-4  # learning rate for actor
     LR_G = 1e-4  # learning rate for critic
     LR_A = 1e-4  # learning rate for actor
@@ -166,11 +227,11 @@ if __name__ == '__main__':
     ITER_train_G = 10
     ITER_D_Training = 400
     ITER_G_Training =400
-    MEMORY_CAPACITY = 5000
+    MEMORY_CAPACITY = 1900
     BATCH_SIZE = 32
     VAR_MIN = 1
     RENDER = False
-    LOAD = False
+    LOAD = True
     MODE = ['easy', 'hard']
     n_model = 1
     ITA = 1  # Curious coefficient
@@ -203,31 +264,8 @@ if __name__ == '__main__':
         G_is_training = tf.placeholder(tf.bool)
         C_is_training = tf.placeholder(tf.bool)
         A_is_training = tf.placeholder(tf.bool)
-    with tf.variable_scope('D_feature_abstraction'):
-        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_is_training)
-        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
-        observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
-        observation = tf.squeeze(observation, 1)
-        LSTM_unit = lstm_unit(phis, phis_, S, sess, phi_is_training, n_lstm_unit=32, time_step=TIME_STEP)
 
-    with tf.variable_scope('G_feature_abstraction'):
-        phis_generator = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, is_training=phi_gen_is_training)
-        gen_LSTM_unit = lstm_unit(phis_generator, None, S, sess, phi_gen_is_training, n_lstm_unit=32,
-                                  time_step=TIME_STEP)
-
-    actor = Actor(sess, ACTION_DIM,  LR_A, BATCH_SIZE, REPLACE_ITER_A, LSTM_unit, S, S_,
-                 phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope = 'Actor', action_bound = None)
-
-    critic = Critic(sess, ACTION_DIM, LR_C, BATCH_SIZE, GAMMA, REPLACE_ITER_C, actor.a, actor.a_, LSTM_unit, S, S_, R,
-                 phi_is_training, C_is_training, A_is_training, USE_BATCH_NORM)
-
-    actor.add_grad_to_graph(critic.a_grads)
-    M = Memory(capacity = MEMORY_CAPACITY)
-    generator = Generator(sess, ACTION_DIM,  LR_A, BATCH_SIZE, actor.a, S, gen_LSTM_unit, LSTM_unit, observation.shape[-1], A,
-                 l2_weight, phi_is_training, phi_gen_is_training, G_is_training, A_is_training, D_is_training)
-    discriminator = Discriminator(sess, LR_D, single_S_, S, generator.G, actor.a, LSTM_unit, gen_LSTM_unit, observation,
-                                  phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight)
-    generator.model_loss(discriminator.D_logit_fake)
+    actor, critic, generator, discriminator, M, LSTM_unit, gen_LSTM_unit= build_model()
 
     saver = tf.train.Saver()
     path = './' + MODE[n_model]
@@ -236,7 +274,7 @@ if __name__ == '__main__':
     else:
         sess.run(tf.global_variables_initializer())
 
-    N_vals = np.linspace(0, 600, 600, endpoint=False)
+    N_vals = np.linspace(0, MAX_EPISODES, MAX_EPISODES, endpoint=False)
     # N_vals = [1, 25, 50, 100, 150, 200, 250, 300, 350, 400, 500, 600]
     N_trials = 1
     J_r_DDPG = np.zeros((N_trials, len(N_vals)))
@@ -246,9 +284,10 @@ if __name__ == '__main__':
     J_G_loss = np.zeros((N_trials, len(N_vals)))
     env.close
     N_repeat = 10
-    if LOAD:
-        eval()
-    else:
+    # if LOAD:
+    #     eval()
+    # else:
+    if True:
         train()
 
         tot_samples = np.array(N_vals)
@@ -256,12 +295,12 @@ if __name__ == '__main__':
 
         label_fontsize = 18
         tick_fontsize = 14
-        linewidth = 3
+        linewidth = 1
         markersize = 10
         plt.plot(tot_samples, np.amin(J_Curious, axis=0), 'o-', color=colors[0], linewidth=linewidth,
                  markersize=markersize, label='Curious_r')
 
-        plt.axis([0, 600, 0, 200])
+        plt.axis([0, MAX_EPISODES, -0.5, 0.5])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
@@ -278,7 +317,7 @@ if __name__ == '__main__':
         # plt.plot(tot_samples, np.amin(J_r_DDPG, axis=0), '-', color=colors[1], linewidth=linewidth,
         #          markersize=markersize, label='DDPG')
 
-        plt.axis([0, 600, 0, 200])
+        plt.axis([0, MAX_EPISODES, 0, 900])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
@@ -293,7 +332,7 @@ if __name__ == '__main__':
         plt.plot(tot_samples, np.amin(J_D_loss, axis=0), 'o-', color=colors[0], linewidth=linewidth,
                  markersize=markersize, label='Curious_r')
 
-        plt.axis([0, 600, 0, 1])
+        plt.axis([0, MAX_EPISODES, 0, 1])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
@@ -308,7 +347,7 @@ if __name__ == '__main__':
         plt.plot(tot_samples, np.amin(J_G_loss, axis=0), 'o-', color=colors[0], linewidth=linewidth,
                  markersize=markersize, label='Curious_r')
 
-        plt.axis([0, 600, 0, 1])
+        plt.axis([0, MAX_EPISODES, 0, 1])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
