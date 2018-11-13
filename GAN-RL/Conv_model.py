@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+from matplotlib import pyplot
 import os
 import shutil
 #coding=utf-8
@@ -74,18 +75,18 @@ def universe_feature_abstraction(s, nConvs=4, reuse=False, time_step=4, output_d
         s = tf.reshape(s, [-1, time_step, np.prod(s.get_shape().as_list()[1:])])
 
         #fc_layer 1
-        s = tf.layers.dense(s, 256, name='dense1', kernel_initializer=init_w, bias_initializer=init_b,
-                            activation=None)
-        if norm:
-            s = tf.layers.batch_normalization(s, training=is_training, name="bn{}".format(nConvs + 1))
-        s = tf.nn.elu(s)
-
-        # fc_layer 2
-        s = tf.layers.dense(s, output_dim, name='dense2', kernel_initializer=init_w, bias_initializer=init_b,
-                            activation=None)
-        if norm:
-            s = tf.layers.batch_normalization(s, training=is_training, name="bn{}".format(nConvs + 2))
-        s = tf.nn.elu(s)
+        # s = tf.layers.dense(s, 256, name='dense1', kernel_initializer=init_w, bias_initializer=init_b,
+        #                     activation=None)
+        # if norm:
+        #     s = tf.layers.batch_normalization(s, training=is_training, name="bn{}".format(nConvs + 1))
+        # s = tf.nn.elu(s)
+        #
+        # # fc_layer 2
+        # s = tf.layers.dense(s, output_dim, name='dense2', kernel_initializer=init_w, bias_initializer=init_b,
+        #                     activation=None)
+        # if norm:
+        #     s = tf.layers.batch_normalization(s, training=is_training, name="bn{}".format(nConvs + 2))
+        # s = tf.nn.elu(s)
     return s
 
 
@@ -171,10 +172,11 @@ class Memory(object):
             self.data_G_lstm_s.append(G_lstm_s)
             self.data_G_lstm_s_.append(G_lstm_s_)
             self.pointer += 1
+            self.len = self.pointer
 
     def sample(self, n):
-        assert self.pointer >= self.capacity, 'Memory has not been fulfilled'
-        indices = np.random.choice(self.capacity, size=n)
+        # assert self.pointer >= self.capacity, 'Memory has not been fulfilled'
+        indices = np.random.choice(self.len, size=n)
         b_s = np.array(self.data_s)[indices]
         b_g = np.array(self.data_g)[indices]
         b_a = np.array(self.data_a)[indices]
@@ -188,8 +190,8 @@ class Memory(object):
         return b_s,b_g,b_D_lstm_s, b_G_lstm_s, b_a, b_r, b_curious_r, b_s_, b_D_lstm_s_, b_G_lstm_s_
 
 class Discriminator(object):
-    def __init__(self, sess, learning_rate, single_s_, s, g, a, lstm_unit, g_lstm_unit, observation, phi_is_training,
-                 g_is_training, a_is_training, d_is_training, batch_size, l2_regularizer_weight):
+    def __init__(self, sess, learning_rate, single_s_, s, g_h, g, a, lstm_unit, g_lstm_unit, observation, phi_is_training,
+                 g_is_training, a_is_training, d_is_training, batch_size, l2_regularizer_weight, mode):
         self.sess = sess
         self.lr = learning_rate
         self.l2_weight = l2_regularizer_weight
@@ -204,6 +206,7 @@ class Discriminator(object):
         self.g_h_in = g_lstm_unit.h_in
         self.g_c_in = g_lstm_unit.c_in
         self.lstm_state_size = lstm_unit.c_in.shape
+        self.G_h = g_h
         self.G = g
         self.g_is_training = g_is_training
         self.obs = observation
@@ -212,11 +215,22 @@ class Discriminator(object):
         self.h_dim = self.h.shape[1].value
         self.obs_dim = self.obs.shape[1].value
         self.a_dim = self.a.shape[1].value
+        self.mode = mode
         with tf.variable_scope('Discriminator'):
-            self.D_real, self.D_logit_real, self.unscaled_D_real = self._build_net(scope='eval_net', s=self.h, a=self.a, G=self.obs,
-                                                             trainable=True, reuse=False, d_is_training=self.d_is_training)
-            self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h, a=self.a, G=self.G,
-                                                             trainable=True, reuse=True, d_is_training=False)
+            self.D_real, self.D_logit_real, self.unscaled_D_real = self._build_net(scope='eval_net', s=self.h,
+                                                                                   a=self.a, G=self.obs,
+                                                                                   trainable=True, reuse=False,
+                                                                                   d_is_training=self.d_is_training)
+            if mode=='full_prediction':
+                self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
+                                                                                       a=self.a, G=self.G_h,
+                                                                                       trainable=True, reuse=True,
+                                                                                       d_is_training=False)
+            else:
+                self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
+                                                                                       a=self.a, G=self.G,
+                                                                                       trainable=True, reuse=True,
+                                                                                       d_is_training=False)
 
             self.params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Discriminator/eval_net')
             # self.D_ = self._build_net('eval_net', S_, self.a, self.G, trainable=False)
@@ -293,20 +307,31 @@ class Discriminator(object):
 
     def learn(self, G_data, s_, s, b_lstm_s, a, b_g_lstm_s):
         s_ = np.expand_dims(s_[:,-1,:],1)
-        self.sess.run(self.train_op, feed_dict={self.S: s, self.G: G_data, self.a: a, self.single_S_: s_,
-                                                self.h_in: b_lstm_s[:, 1, :], self.c_in: b_lstm_s[:, 0, :],
-                                                #self.g_h_in: b_g_lstm_s[:, 1, :], self.g_c_in: b_g_lstm_s[:, 0, :],
-                                                self.d_is_training:True, self.phi_is_training:True,
-                                                self.a_is_training:False, self.g_is_training:False})
+        feed_dict = {self.S: s, self.a: a, self.single_S_: s_,
+                     self.h_in: b_lstm_s[:, 1, :], self.c_in: b_lstm_s[:, 0, :],
+                     self.g_h_in: b_g_lstm_s[:, 1, :], self.g_c_in: b_g_lstm_s[:, 0, :],
+                     self.d_is_training: True, self.phi_is_training: True,
+                     self.a_is_training: False, self.g_is_training: False}
+        if self.mode=='full_prediction':
+            feed_dict[self.G] = G_data
+        else:
+            feed_dict[self.G_h] = G_data
+        self.sess.run(self.train_op, feed_dict=feed_dict)
 
     def determine(self, s, lstm_s, a, g):
         s = s[np.newaxis, :]
         a = a[np.newaxis, :]
         g = g[np.newaxis, :]
-        return 0.5-self.sess.run(self.D_fake, feed_dict={self.S: s, self.G: g, self.a: a, self.h_in: lstm_s[1],
-                                                         self.c_in: lstm_s[0], self.d_is_training: False,
-                                                         self.phi_is_training: False, self.a_is_training: False,
-                                                         self.g_is_training: False})
+        feed_dict = {self.S: s, self.a: a, self.h_in: lstm_s[1],
+                     self.c_in: lstm_s[0], self.d_is_training: False,
+                     self.phi_is_training: False, self.a_is_training: False,
+                     self.g_is_training: False}
+        if self.mode=='full_prediction':
+            feed_dict[self.G] = g
+        else:
+            feed_dict[self.G_h] = g
+        return 0.5-self.sess.run(self.D_fake,feed_dict=feed_dict)
+
     def determine_batch(self, b_s, b_lstm_s, b_a, b_g):
 
         return np.ones([b_s.shape[0],1])-self.sess.run(self.D_fake, feed_dict={self.S: b_s, self.G: b_g, self.a: b_a,
@@ -322,24 +347,33 @@ class Discriminator(object):
         single_s_ = s_[-1]
         single_s_ = np.expand_dims(single_s_, axis=0)
         single_s_ = np.expand_dims(single_s_, axis=0)
-        obs_ = self.sess.run(self.obs, feed_dict={self.single_S_: single_s_, self.phi_is_training: False})[0]
-        return np.sum(np.square(obs_-g))
+        if self.mode =='hidden_state':
+            obs_ = self.sess.run(self.obs, feed_dict={self.single_S_: single_s_, self.phi_is_training: False})[0]
+            return np.sum(np.square(obs_-g))
+        else:
+            return 0.
+
 
     def eval(self, b_g, b_s_, b_s, b_lstm_s, b_a, b_g_lstm_s):
 
         b_single_s_ = np.expand_dims(b_s_[:, -1, :], 1)
-        return self.sess.run(self.D_loss, feed_dict={self.S: b_s, self.G: b_g, self.a: b_a, self.single_S_: b_single_s_
-                                                     , self.h_in: b_lstm_s[:, 1, :], self.c_in: b_lstm_s[:, 0, :],
-                                                     self.d_is_training: False,
-                                                     self.phi_is_training: False,
-                                                     self.a_is_training: False,
-                                                     self.g_is_training: False
-                                                     })
+        feed_dict = {self.S: b_s, self.a: b_a, self.single_S_: b_single_s_,
+                     self.h_in: b_lstm_s[:, 1, :], self.c_in: b_lstm_s[:, 0, :],
+                     self.g_h_in: b_g_lstm_s[:, 1, :], self.g_c_in: b_g_lstm_s[:, 0, :],
+                     self.d_is_training: False, self.phi_is_training: False,
+                     self.a_is_training: False, self.g_is_training: False}
+        if self.mode== 'full_prediction':
+            feed_dict[self.G] = b_g
+        else:
+            feed_dict[self.G_h] = b_g
+
+        return self.sess.run(self.D_loss, feed_dict=feed_dict)
 
 
 class Generator(object):
     def __init__(self, sess, action_dim,  Learning_rate, batch_size, a, S, LSTM_unit, d_LSTM_unit, phi_dim, batch_a,
-                 l2_regularizer_weight, phi_is_training, phi_gen_is_training, g_is_training, a_is_training, d_is_training):
+                 l2_regularizer_weight, phi_is_training, phi_gen_is_training, g_is_training, a_is_training, d_is_training,
+                 mode):
         self.sess = sess
         self.batch_size = batch_size
         self.l2_weight = l2_regularizer_weight
@@ -361,10 +395,15 @@ class Generator(object):
         self.a_is_training = a_is_training
         self.d_is_training = d_is_training
         self.phi_gen_is_training = phi_gen_is_training
+        self.mode = mode
         with tf.variable_scope('Generator'):
+            if mode =='hidden_state':
+                self.G = self._build_net('eval_net', self.h, self.a, True, False, self.g_is_training)
+                self.G_batch = self._build_net('eval_net', self.h, self.batch_a, False, True, False)
+            else:
+                self.G = self._build_full_generator('eval_net', self.h, self.a, True, False, self.g_is_training)
+                self.G_batch = self._build_full_generator('eval_net', self.h, self.batch_a, False, True, False)
 
-            self.G = self._build_net('eval_net', self.h, self.a, True, False, self.g_is_training)
-            self.G_batch = self._build_net('eval_net', self.h, self.batch_a, False, True, False)
         t_vars = tf.trainable_variables()
         self.vars = [var for var in t_vars if var.name.startswith('Generator')or var.name.startswith('G_')]
         for var in self.vars:
@@ -416,7 +455,7 @@ class Generator(object):
             #     G = tf.layers.batch_normalization(G, training=g_is_training)
         return G
 
-    def _build_graph_generator(self, scope, s, a, trainable, reuse, g_is_training, norm=True):
+    def _build_full_generator(self, scope, s, a, trainable, reuse, g_is_training, norm=True):
         with tf.variable_scope(scope, reuse=reuse):
             init_w = tf.contrib.layers.xavier_initializer()
             init_b = tf.constant_initializer(0.001)
@@ -458,7 +497,7 @@ class Generator(object):
                                   name='l4', trainable=trainable)
             # if norm:
             #     G = tf.layers.batch_normalization(G, training=g_is_training)
-            G = tf.reshape(G, [-1,42,42,1])
+            G = tf.reshape(G, [-1,1,42,42,1])
         return G
 
     def model_loss(self, D_logit_fake):
