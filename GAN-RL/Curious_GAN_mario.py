@@ -52,20 +52,22 @@ def train():
         env = gym.make(env_id)
         env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=True)
         s = env.reset()
-
+        short_term_curious_r = 0
+        short_term_pred_error = 0
         a_pred_loss= 0
         for t in range(MAX_EP_STEPS):
             a = actor.choose_action(s, lstm_state, var)
             g = generator.predict(s, a)
             s_, r, done, info, _ = env._step(a)
-
+            dense_a = transfer_sparse_action(a)
             curious_r = ITA * discriminator.determine(s, a, g)[0]
             lstm_state_ = actor.LSTM_unit.get_state(s, lstm_state)
 
             one_step_l_2_loss = discriminator.observe_and_compare(s_, g,)
             l_2_loss += one_step_l_2_loss
-
-            M.store_transition(s, g, lstm_state, a, r, curious_r, s_,lstm_state_)
+            short_term_pred_error += one_step_l_2_loss
+            short_term_curious_r += curious_r
+            M.store_transition(s, g, lstm_state, a, r, curious_r, s_,lstm_state_, dense_a)
             if M.pointer > MEMORY_CAPACITY:
                 var = max([var * .9999, VAR_MIN])
                 # for i in range(ITER_train_G):
@@ -76,23 +78,23 @@ def train():
                     lr_pointer = min(lr_pointer+1,len(LR_D_list))
 
 
-                b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_ = M.sample(BATCH_SIZE)
+                b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_, b_d_a = M.sample(BATCH_SIZE)
                 if not ASYN_TRAIN_GAN:
-                    generator.learn(b_s, b_a, LR_G_list[lr_pointer], b_s_)
-                b_g = generator.predict_batch(b_s, b_a)
+                    generator.learn(b_s, b_d_a, LR_G_list[lr_pointer], b_s_)
+                b_g = generator.predict_batch(b_s, b_d_a)
                 if not ASYN_TRAIN_GAN:
-                    discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
+                    discriminator.learn(b_g, b_s_, b_s, b_d_a, LR_D_list[lr_pointer])
 
                 # Learn the minibatch
                 # b_curious_r = discriminator.determine_batch(b_s, b_lstm_s, b_a, b_g)
                 A_pred.learn(b_s, b_s_, b_a, LR_A_pred_list[lr_pointer])
-                critic.learn(b_s,b_lstm_s, b_a, b_curious_r, b_s_, b_lstm_s_)
+                critic.learn(b_s,b_lstm_s, b_d_a, b_curious_r, b_s_, b_lstm_s_)
                 actor.learn(b_s, b_lstm_s)
-                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
+                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_d_a)
                 D_loss += one_step_D_loss
-                one_step_G_loss = generator.eval(b_s, b_a, b_s_)
+                one_step_G_loss = generator.eval(b_s, b_d_a, b_s_)
                 G_loss += one_step_G_loss
-                a_pred_loss = A_pred.eval(b_s, b_s_, b_a)
+                a_pred_loss = A_pred.eval(b_s, b_s_, b_d_a)
 
 
                 if t % 10 == 0:
@@ -100,15 +102,17 @@ def train():
                     print('Ep:', ep,
                           '| Step:%i' % int(t),
                           '| R: %i' % int(ep_reward),
-                          '| Curious_R: %f' % float(curious_r),
+                          '| Curious_R: %f' % float(short_term_curious_r/10),
                           '| Real_data_Check: %f' % float(check_real_data),
-                          '| Prediction_error: %f' % float(one_step_l_2_loss),
+                          '| Prediction_error: %f' % float(short_term_pred_error/10),
                           '| A_Pred_error: %f' % float(a_pred_loss),
                           '| D loss: %f' % float(one_step_D_loss),
                           '| G loss: %f' % float(one_step_G_loss),
                           '| Explore: %.2f' % var,
                           '| Global Steps:%i' % int(total_steps),
                               )
+                    short_term_curious_r =0
+                    short_term_pred_error = 0
 
                 if n_mode==1 and t % 200 == 0:
                         plt.ion()
@@ -226,7 +230,10 @@ def transfer_picture(images, mode='L'):
         col += w
     return new_im
 
-
+def transfer_sparse_action(a):
+    dense_a = np.ones(a.shape)*0.1
+    dense_a[np.argmax(a)] = 1
+    return dense_a
 
 def eval():
     env.set_fps(30)
@@ -305,7 +312,6 @@ def build_model():
 
 if __name__ == '__main__':
     env_id = 'ppaquette/SuperMarioBros-1-1-v0'
-
     smooth = 0
     np.random.seed(1)
     # tf.set_random_seed(1)
@@ -341,10 +347,11 @@ if __name__ == '__main__':
     ITA = 1  # Curious coefficient
 
     frame_skip = acRepeat if acRepeat > 0 else 4
-    lock = multiprocessing.Lock()
-    env = gym.make(env_id)
-    env.configure(lock=lock)
-    env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=True)
+    if 'Mario' in env_id:
+        lock = multiprocessing.Lock()
+        env = gym.make(env_id)
+        env.configure(lock=lock)
+        env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=True)
 
     STATE_DIM = env.observation_space.shape
     ACTION_DIM = env.action_space.shape

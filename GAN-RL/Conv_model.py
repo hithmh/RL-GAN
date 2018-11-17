@@ -24,34 +24,7 @@ def doom_feature_abstraction(s):
         s = tf.layers.dense(s, 256, activation= tf.nn.elu, name='fc', kernel_constraint=init_w, bias_initializer=init_b)
 
     return s
-def bn_layer(x, is_training, name=None, moving_decay=0.9, eps=1e-5, reuse=False):
 
-    shape = x.shape
-    assert len(shape) in [2,4]
-    init_w = tf.contrib.layers.xavier_initializer()
-    init_b = tf.constant_initializer(0.001)
-    param_shape = shape[-1]
-    with tf.variable_scope(name+'_BatchNorm', reuse=reuse):
-
-        gamma = tf.get_variable('gamma',param_shape,initializer=init_w)
-        beta = tf.get_variable('beat', param_shape,initializer=init_b)
-
-
-        axes = list(range(len(shape)-1))
-        batch_mean, batch_var = tf.nn.moments(x,axes,name='moments')
-
-
-        ema = tf.train.ExponentialMovingAverage(moving_decay)
-
-        def mean_var_with_update():
-            ema_apply_op = ema.apply([batch_mean,batch_var])
-            with tf.control_dependencies([ema_apply_op]):
-                return tf.identity(batch_mean), tf.identity(batch_var)
-
-        # with tf.variable_scope('', reuse=tf.AUTO_REUSE):
-        mean, var = tf.cond(tf.equal(is_training, True), mean_var_with_update,lambda: (ema.average(batch_mean), ema.average(batch_var)))
-
-        return tf.nn.batch_normalization(x, mean, var, beta, gamma, eps)
 
 
 def universe_feature_abstraction(s, nConvs=4, reuse=False, time_step=4, output_dim=32, norm = True, is_training=False):
@@ -69,6 +42,7 @@ def universe_feature_abstraction(s, nConvs=4, reuse=False, time_step=4, output_d
             else:
                 s = tf.layers.conv2d(s, 32, [3, 3], [2, 2], name="l{}".format(i + 1), activation=tf.nn.elu,
                                      )
+
 
             # print('Loop{} '.format(i+1),tf.shape(x))
             # print('Loop{}'.format(i+1),x.get_shape())
@@ -133,12 +107,13 @@ class Memory(object):
         self.data_lstm_s = []
         self.data_lstm_s_ = []
         self.data_a = []
+        self.data_dense_a = []
         self.data_r = []
         self.data_curious_r = []
         self.data_s_ = []
         self.pointer = 0
 
-    def store_transition(self, s, g, lstm_s, a, r, curious_r, s_, lstm_s_):
+    def store_transition(self, s, g, lstm_s, a, r, curious_r, s_, lstm_s_, dense_a):
         # transition = np.hstack((s, a, [r], s_))
 
         if self.pointer > self.capacity:
@@ -148,6 +123,7 @@ class Memory(object):
             self.data_lstm_s[index] = lstm_s
             self.data_lstm_s_[index] = lstm_s_
             self.data_a[index] = a
+            self.data_dense_a[index] = dense_a
             self.data_r[index] = r
             self.data_curious_r[index] = curious_r
             self.data_s_[index] = s_
@@ -157,6 +133,7 @@ class Memory(object):
             self.data_s.append(s)
             self.data_g.append(g)
             self.data_a.append(a)
+            self.data_dense_a.append(dense_a)
             self.data_r.append(r)
             self.data_curious_r.append(curious_r)
             self.data_s_.append(s_)
@@ -171,12 +148,13 @@ class Memory(object):
         b_s = np.array(self.data_s)[indices]
         b_g = np.array(self.data_g)[indices]
         b_a = np.array(self.data_a)[indices]
+        b_d_a = np.array(self.data_dense_a)[indices]
         b_r = np.array(self.data_r)[indices]
         b_curious_r = np.array(self.data_curious_r)[indices]
         b_s_ = np.array(self.data_s_)[indices]
         b_lstm_s = np.squeeze(np.array(self.data_lstm_s)[indices], 2)
         b_lstm_s_ = np.squeeze(np.array(self.data_lstm_s_)[indices], 2)
-        return b_s, b_g, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s
+        return b_s, b_g, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s, b_d_a
 
 class Discriminator(object):
     def __init__(self, sess, learning_rate, s_, s, phis, g_h, g, a, phis_, phi_is_training,
@@ -403,18 +381,29 @@ class Generator(object):
             # input layer
             with tf.variable_scope('l1'):
                 n_l1 = self.G_dim #200
-                w1_s = tf.get_variable('w1_s', [self.h_dim, n_l1], initializer=init_w, trainable=trainable)
+
                 w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w, trainable=trainable)
                 b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
                 if not reuse:
-                    tf.add_to_collection('G_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_s))
                     tf.add_to_collection('G_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_a))
-                net = tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1
+                net = tf.matmul(a, w1_a) + b1
                 if norm:
                     net = tf.layers.batch_normalization(net,training=g_is_training)
                 net = tf.nn.relu(net)
+
+            # with tf.variable_scope('l2'):
+            #     n_l1 = self.G_dim #200
+            #     w1_s = tf.get_variable('w1_s', [self.h_dim, n_l1], initializer=init_w, trainable=trainable)
+            #
+            #     b2 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
+            #     if not reuse:
+            #         tf.add_to_collection('G_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_s))
+            #     net = tf.matmul(s, w1_s) + b2
+            #     if norm:
+            #         net = tf.layers.batch_normalization(net,training=g_is_training)
+            #     net = tf.nn.relu(net)
             # layer 1
-            net = tf.layers.dense(net, self.G_dim, kernel_initializer=init_w, bias_initializer=init_b,
+            net = tf.layers.dense( net+s, self.G_dim, kernel_initializer=init_w, bias_initializer=init_b,
                                   name='l2', trainable=trainable)
             if norm:
                 net = tf.layers.batch_normalization(net, training=g_is_training)
@@ -483,12 +472,12 @@ class Generator(object):
             G = tf.reshape(G, [-1,42,42,1])
         return G
 
-    def model_loss(self, unscaled_D_fake, phis_):
+    def model_loss(self, unscaled_D_fake, phis_=None):
         with tf.variable_scope('G_loss'):
             G_mseloss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=unscaled_D_fake,
                                                                                  labels=tf.ones_like(
                                                                                      unscaled_D_fake)))
-            G_mseloss = tf.reduce_mean(tf.squared_difference(self.G, phis_))
+            # G_mseloss = tf.reduce_mean(tf.squared_difference(self.G, phis_))
             normalization_loss = tf.add_n(tf.get_collection('G_losses'))
             self.G_loss = G_mseloss + normalization_loss
             self.train_op = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.G_loss, var_list= self.vars)
