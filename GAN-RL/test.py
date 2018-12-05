@@ -1,10 +1,8 @@
-import numpy as np
-s = np.zeros([42,42])
-r = np.zeros([1])
-
-transition = [s,[r]]
-data = []
-data.append(transition)
-transition2 = transition
-data.append(transition2)
-print(data)
+import gym
+import gym_pull
+gym_pull.pull('github.com/ppaquette/gym-doom')        # Only required once, envs will be loaded with import gym_pull afterwards
+env = gym.make('ppaquette/DoomBasic-v0')
+# impo
+# env = gym.make('FetchReach-v1')
+# env.reset()
+# env.render()

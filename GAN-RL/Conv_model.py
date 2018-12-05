@@ -184,16 +184,22 @@ class Discriminator(object):
                                                                                    a=self.a, G=self.obs,
                                                                                     reuse=False,
                                                                                    d_is_training=self.d_is_training)
-            if mode=='full_prediction':
+            if mode == 'full_prediction':
                 self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
                                                                                        a=self.a, G=self.G_h,
                                                                                        reuse=True,
                                                                                        d_is_training=False)
+                t_vars = tf.trainable_variables()
+                self.vars = [var for var in t_vars if var.name.startswith('Discriminator')
+                             or var.name.startswith('feature_abstraction')or var.name.startswith('single_feature_abstraction')]
             else:
                 self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
                                                                                        a=self.a, G=self.G,
                                                                                        reuse=True,
                                                                                        d_is_training=False)
+                t_vars = tf.trainable_variables()
+                self.vars = [var for var in t_vars if var.name.startswith('Discriminator')
+                             ]
 
             self.params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Discriminator/eval_net')
             # self.D_ = self._build_net('eval_net', S_, self.a, self.G, trainable=False)
@@ -206,19 +212,17 @@ class Discriminator(object):
                                                                                       labels=tf.ones_like(
                                                                                           self.unscaled_D_real) * (
                                                                                                      1 - smooth)))
-            t_vars = tf.trainable_variables()
-            self.vars = [var for var in t_vars if var.name.startswith('Discriminator')
-                        ]
+
             for var in self.vars:
                 if var.name.endswith('kernel:0'):
                     tf.add_to_collection('D_losses',tf.contrib.layers.l2_regularizer(self.l2_weight)(var))
-            self.D_loss = self.D_loss_real + self.D_loss_fake + tf.add_n(tf.get_collection('D_losses'))
+            self.D_loss = self.D_loss_real + self.D_loss_fake #+ tf.add_n(tf.get_collection('D_losses'))
 
         with tf.variable_scope('D_train'):
 
             self.train_op = tf.train.AdamOptimizer(self.lr).minimize(self.D_loss, var_list=self.vars)
 
-    def _build_net(self, scope, s, a, G, d_is_training,  reuse=False, norm=False):
+    def _build_net(self, scope, s, a, G, d_is_training, reuse=False, norm=False):
         """
         Create the discriminator network
         param reuse: Boolean if the weights should be reused
@@ -266,12 +270,197 @@ class Discriminator(object):
     def learn(self, G_data, s_, s, a, lr):
 
         feed_dict = {self.S: s, self.a: a, self.single_S_: s_, self.lr: lr,
-                     self.d_is_training: True, self.phi_is_training: False,
+                     self.d_is_training: True,
                      self.a_is_training: False, self.g_is_training: False}
         if self.mode=='full_prediction':
             feed_dict[self.G] = G_data
+            feed_dict[self.phi_is_training] = True
         else:
             feed_dict[self.G_h] = G_data
+            feed_dict[self.phi_is_training] = False
+        self.sess.run(self.train_op, feed_dict=feed_dict)
+
+    def determine(self, s, a, g):
+        s = s[np.newaxis, :]
+        a = a[np.newaxis, :]
+        g = g[np.newaxis, :]
+        feed_dict = {self.S: s, self.a: a,  self.d_is_training: False,
+                     self.phi_is_training: False, self.a_is_training: False,
+                     self.g_is_training: False}
+        if self.mode=='full_prediction':
+            feed_dict[self.G] = g
+        else:
+            feed_dict[self.G_h] = g
+        return 1-self.sess.run(self.D_fake,feed_dict=feed_dict)
+
+    def determine_batch(self, b_s,  b_a, b_g):
+
+        return np.ones([b_s.shape[0],1])-self.sess.run(self.D_fake, feed_dict={self.S: b_s, self.G: b_g, self.a: b_a,
+                                                                               self.d_is_training: False,
+                                                                               self.phi_is_training: False,
+                                                                               self.a_is_training: False,
+                                                                               self.g_is_training: False
+                                                                               })
+
+    def observe_and_compare(self, s_, g):
+
+        s_ = np.expand_dims(s_, axis=0)
+
+        if self.mode =='hidden_state':
+            obs_ = self.sess.run(self.obs, feed_dict={self.single_S_: s_, self.phi_is_training: False})[0]
+            return np.sum(np.square(obs_-g))
+        else:
+            return 0.
+    def check_the_real_data(self, s, a, s_):
+        s = s[np.newaxis, :]
+        a = a[np.newaxis, :]
+        s_ = s_[np.newaxis, :]
+
+        feed_dict = {self.S: s, self.a: a, self.d_is_training: False,
+                     self.phi_is_training: False, self.a_is_training: False,
+                     self.g_is_training: False}
+        if self.mode == 'full_prediction':
+            feed_dict[self.G] = s_
+        else:
+            obs_ = self.sess.run(self.obs, feed_dict={self.single_S_: s_, self.phi_is_training: False})
+            feed_dict[self.G_h] = obs_
+        return 1 - self.sess.run(self.D_fake, feed_dict=feed_dict)
+    def eval(self, b_g, b_s_, b_s, b_a):
+
+
+        feed_dict = {self.S: b_s, self.a: b_a, self.single_S_: b_s_,
+
+                     self.d_is_training: False, self.phi_is_training: False,
+                     self.a_is_training: False, self.g_is_training: False}
+        if self.mode== 'full_prediction':
+            feed_dict[self.G] = b_g
+        else:
+            feed_dict[self.G_h] = b_g
+
+        return self.sess.run(self.D_loss, feed_dict=feed_dict)
+
+class Discriminator(object):
+    def __init__(self, sess, learning_rate, s_, s, phis, g_h, g, a, phis_, phi_is_training,
+                 g_is_training, a_is_training, d_is_training, batch_size, l2_regularizer_weight, mode):
+        self.sess = sess
+        self.lr = learning_rate
+        self.l2_weight = l2_regularizer_weight
+        self.batch_size = batch_size
+        self.S = s
+        self.d_is_training = d_is_training
+        self.phi_is_training = phi_is_training
+        self.single_S_ = s_
+
+        self.h = phis
+        self.G_h = g_h
+        self.G = g
+        self.g_is_training = g_is_training
+        self.obs = phis_
+        self.a = a
+        self.a_is_training = a_is_training
+        self.h_dim = self.h.shape[1].value
+        self.obs_dim = self.obs.shape[1].value
+        self.a_dim = self.a.shape[1].value
+        self.mode = mode
+        with tf.variable_scope('Discriminator'):
+            self.D_real, self.D_logit_real, self.unscaled_D_real = self._build_net(scope='eval_net', s=self.h,
+                                                                                   a=self.a, G=self.obs,
+                                                                                    reuse=False,
+                                                                                   d_is_training=self.d_is_training)
+            if mode == 'full_prediction':
+                self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
+                                                                                       a=self.a, G=self.G_h,
+                                                                                       reuse=True,
+                                                                                       d_is_training=False)
+                t_vars = tf.trainable_variables()
+                self.vars = [var for var in t_vars if var.name.startswith('Discriminator')
+                             or var.name.startswith('feature_abstraction')or var.name.startswith('single_feature_abstraction')]
+            else:
+                self.D_fake, self.D_logit_fake, self.unscaled_D_fake = self._build_net(scope='eval_net', s=self.h,
+                                                                                       a=self.a, G=self.G,
+                                                                                       reuse=True,
+                                                                                       d_is_training=False)
+                t_vars = tf.trainable_variables()
+                self.vars = [var for var in t_vars if var.name.startswith('Discriminator')
+                             ]
+
+            self.params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Discriminator/eval_net')
+            # self.D_ = self._build_net('eval_net', S_, self.a, self.G, trainable=False)
+        with tf.variable_scope('D_loss'):
+            self.D_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.unscaled_D_fake,
+                                                                                      labels=tf.zeros_like(
+                                                                                          self.unscaled_D_fake)))
+
+            self.D_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.unscaled_D_real,
+                                                                                      labels=tf.ones_like(
+                                                                                          self.unscaled_D_real) * (
+                                                                                                     1 - smooth)))
+
+            for var in self.vars:
+                if var.name.endswith('kernel:0'):
+                    tf.add_to_collection('D_losses',tf.contrib.layers.l2_regularizer(self.l2_weight)(var))
+            self.D_loss = self.D_loss_real + self.D_loss_fake #+ tf.add_n(tf.get_collection('D_losses'))
+
+        with tf.variable_scope('D_train'):
+
+            self.train_op = tf.train.AdamOptimizer(self.lr).minimize(self.D_loss, var_list=self.vars)
+
+    def _build_net(self, scope, s, a, G, d_is_training, reuse=False, norm=False):
+        """
+        Create the discriminator network
+        param reuse: Boolean if the weights should be reused
+        """
+        with tf.variable_scope(scope, reuse= reuse):
+            init_w = tf.contrib.layers.xavier_initializer()
+            init_b = tf.constant_initializer(0.001)
+
+            # alpha: leak relu coefficient
+            alpha = 0.2
+            # input layer
+            with tf.variable_scope('l1'):
+                n_l1 = 200
+                w1_G = tf.get_variable('w1_G',[self.obs_dim, n_l1], initializer=init_w)
+
+                w1_s = tf.get_variable('w1_s',[self.h_dim, n_l1], initializer=init_w)
+
+                w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w)
+                b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b)
+                if not reuse:
+                    tf.add_to_collection('D_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_G))
+                    tf.add_to_collection('D_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_s))
+                    tf.add_to_collection('D_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_a))
+                net = tf.matmul(s, w1_s) + tf.matmul(G, w1_G) + tf.matmul(a, w1_a) + b1
+                if norm:
+                    net = tf.layers.batch_normalization(net, training=d_is_training)
+                net = tf.nn.relu(net)
+
+
+            # layer 2
+            net = tf.layers.dense(net, 10, kernel_initializer=init_w, bias_initializer=init_b,
+                                  name='l3')
+            if norm:
+                net = tf.layers.batch_normalization(net, training=d_is_training)
+            D_logit = tf.nn.relu(net)
+
+            # layer 3
+            with tf.variable_scope('D'):
+
+                unscaled_D = tf.layers.dense(D_logit, 1,  kernel_initializer=init_w, bias_initializer= init_b,
+                                  name= 'l2')
+                D = tf.nn.sigmoid(unscaled_D)
+        return D, D_logit, unscaled_D
+
+    def learn(self, G_data, s_, s, a, lr):
+
+        feed_dict = {self.S: s, self.a: a, self.single_S_: s_, self.lr: lr,
+                     self.d_is_training: True,
+                     self.a_is_training: False, self.g_is_training: False}
+        if self.mode=='full_prediction':
+            feed_dict[self.G] = G_data
+            feed_dict[self.phi_is_training] = True
+        else:
+            feed_dict[self.G_h] = G_data
+            feed_dict[self.phi_is_training] = False
         self.sess.run(self.train_op, feed_dict=feed_dict)
 
     def determine(self, s, a, g):
@@ -335,7 +524,7 @@ class Discriminator(object):
 
 
 class Generator(object):
-    def __init__(self, sess, action_dim,  Learning_rate, batch_size, a, S, S_, phis, batch_a,
+    def __init__(self, sess, use_batch_norm, action_dim,  Learning_rate, batch_size, a, S, S_, phis, batch_a,
                  l2_regularizer_weight, phi_is_training,  g_is_training, a_is_training, d_is_training,
                  mode):
         self.sess = sess
@@ -358,11 +547,11 @@ class Generator(object):
         self.mode = mode
         with tf.variable_scope('Generator'):
             if mode =='hidden_state':
-                self.G = self._build_net('eval_net', self.h, self.a, True, False, self.g_is_training)
-                self.G_batch = self._build_net('eval_net', self.h, self.batch_a, False, True, False)
+                self.G = self._build_net('eval_net', self.h, self.a, True, False, self.g_is_training, use_batch_norm)
+                self.G_batch = self._build_net('eval_net', self.h, self.batch_a, False, True, False, use_batch_norm)
             else:
-                self.G = self._build_full_generator('eval_net', self.h, self.a, True, False, self.g_is_training)
-                self.G_batch = self._build_full_generator('eval_net', self.h, self.batch_a, False, True, False)
+                self.G = self._build_full_generator('eval_net', self.h, self.a, True, False, self.g_is_training, use_batch_norm)
+                self.G_batch = self._build_full_generator('eval_net', self.h, self.batch_a, False, True, False, use_batch_norm)
 
         self.params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Generator/eval_net')
         t_vars = tf.trainable_variables()
@@ -445,8 +634,49 @@ class Generator(object):
                 net = tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1
                 if norm:
                     net = tf.layers.batch_normalization(net,training=g_is_training)
+                net = tf.nn.relu(net)
+            # layer 1
+            net = tf.reshape(net, [-1, 1, 1, n_l1])
+            net = tf.layers.conv2d_transpose(net, 128, 3, strides=2, activation=None, name="dec_deconv1")
+            if norm:
+                net = tf.layers.batch_normalization(net, training=g_is_training)
+            net = tf.nn.relu(net)
+            # layer 2
+            net = tf.layers.conv2d_transpose(net, 64, 4, strides=2, activation=None, name="dec_deconv2")
+            if norm:
+                net = tf.layers.batch_normalization(net, training=g_is_training)
+            net = tf.nn.relu(net)
+            # layer 3
+            net = tf.layers.conv2d_transpose(net, 32, 5, strides=2, activation=None, name="dec_deconv3")
+            if norm:
+                net = tf.layers.batch_normalization(net, training=g_is_training)
+            net = tf.nn.relu(net)
+            # layer 4
+            G = tf.layers.conv2d_transpose(net, 1, 6, strides=2, activation=None, name="dec_deconv4")
+
+        return G
+
+    def _build_full_dense_generator(self, scope, s, a, trainable, reuse, g_is_training, norm=True):
+        with tf.variable_scope(scope, reuse=reuse):
+            init_w = tf.contrib.layers.xavier_initializer()
+            init_b = tf.constant_initializer(0.001)
+            # alpha: leak relu coefficient
+            alpha = 0.2
+            # input layer
+            with tf.variable_scope('l1'):
+                n_l1 = 200
+                w1_s = tf.get_variable('w1_s', [self.h_dim, n_l1], initializer=init_w, trainable=trainable)
+                w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w, trainable=trainable)
+                b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
+                if not reuse:
+                    tf.add_to_collection('G_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_s))
+                    tf.add_to_collection('G_losses', tf.contrib.layers.l2_regularizer(self.l2_weight)(w1_a))
+                net = tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1
+                if norm:
+                    net = tf.layers.batch_normalization(net, training=g_is_training)
                 net = tf.nn.elu(net)
             # layer 1
+
             net = tf.layers.dense(net, 500, kernel_initializer=init_w, bias_initializer=init_b,
                                   name='l2', trainable=trainable)
             if norm:
@@ -466,12 +696,11 @@ class Generator(object):
             net = tf.nn.elu(net)
             # layer 3
             G = tf.layers.dense(net, 1764, activation=None, kernel_initializer=init_w, bias_initializer=init_b,
-                                  name='l4', trainable=trainable)
+                                name='l4', trainable=trainable)
             # if norm:
             #     G = tf.layers.batch_normalization(G, training=g_is_training)
-            G = tf.reshape(G, [-1,42,42,1])
+            G = tf.reshape(G, [-1, 42, 42, 1])
         return G
-
     def model_loss(self, unscaled_D_fake, phis_=None):
         with tf.variable_scope('G_loss'):
             G_mseloss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=unscaled_D_fake,
@@ -479,7 +708,7 @@ class Generator(object):
                                                                                      unscaled_D_fake)))
             # G_mseloss = tf.reduce_mean(tf.squared_difference(self.G, phis_))
             normalization_loss = tf.add_n(tf.get_collection('G_losses'))
-            self.G_loss = G_mseloss + normalization_loss
+            self.G_loss = G_mseloss #+ normalization_loss
             self.train_op = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.G_loss, var_list= self.vars)
 
     def learn(self, s, a, lr, s_):
@@ -726,7 +955,7 @@ class Actor(object):
 
 
 class StateActionPredictor(object):
-    def __init__(self, s, s_, phis, phis_, a, A_pred_is_training, phi_is_training, l2_weight, learning_rate, sess, norm=True):
+    def __init__(self, s, s_, phis, phis_, a, A_pred_is_training, phi_is_training, l2_weight, learning_rate, sess, mode, norm=True):
         # input: s1,s2: : [None, h, w, ch] (usually ch=1 or 4)
         # asample: 1-hot encoding of sampled action from policy: [None, ac_space]
 
@@ -745,8 +974,12 @@ class StateActionPredictor(object):
 
             # variable list
             t_vars = tf.trainable_variables()
-            self.vars = [var for var in t_vars if var.name.startswith('A_pred')
-                         or var.name.startswith('feature_abstraction')]
+            if mode == 'full_prediciton':
+                self.vars = [var for var in t_vars if var.name.startswith('A_pred')
+                             ]
+            else:
+                self.vars = [var for var in t_vars if var.name.startswith('A_pred')
+                             or var.name.startswith('feature_abstraction')]
             for var in self.vars:
                 if var.name.endswith('kernel:0'):
                     tf.add_to_collection('A_pred', tf.contrib.layers.l2_regularizer(self.l2_weight)(var))

@@ -1,7 +1,10 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="-1"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import tensorflow as tf
 import numpy as np
 import shutil
-import os
 from Conv_model import *
 import matplotlib.pyplot as plt
 import gym
@@ -11,14 +14,15 @@ import env_wrapper
 import multiprocessing
 from PIL import Image
 
-
-def train():
+np.random.seed(1)
+tf.set_random_seed(1)
+def train(pretrain_step = 0):
     # gpu_options = tf.GPUOptions(gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.85))
     var = 2.
     pointer = 0
     # timestep_limit = env.spec.tags.get('wrapper_config.TimeLimit.max_episode_steps')
     # if timestep_limit is None: timestep_limit = env.spec.timestep_limit
-    total_steps = 0
+    total_steps = pretreain_step
     lr_pointer = 0
     for ep in range(MAX_EPISODES):
 
@@ -57,9 +61,10 @@ def train():
         a_pred_loss= 0
         for t in range(MAX_EP_STEPS):
             a = actor.choose_action(s, lstm_state, var)
-            g = generator.predict(s, a)
-            s_, r, done, info, _ = env._step(a)
             dense_a = transfer_sparse_action(a)
+
+            s_, r, done, info, _ = env._step(a)
+            g = generator.predict(s, a)
             curious_r = ITA * discriminator.determine(s, a, g)[0]
             lstm_state_ = actor.LSTM_unit.get_state(s, lstm_state)
 
@@ -67,9 +72,9 @@ def train():
             l_2_loss += one_step_l_2_loss
             short_term_pred_error += one_step_l_2_loss
             short_term_curious_r += curious_r
-            M.store_transition(s, g, lstm_state, a, r, curious_r, s_,lstm_state_, dense_a)
+            M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_, dense_a)
             if M.pointer > MEMORY_CAPACITY:
-                var = max([var * .9999, VAR_MIN])
+
                 # for i in range(ITER_train_G):
                 #     b_s, b_a, b_r, b_curious_r, b_s_ = M.sample(BATCH_SIZE)
                 #     generator.learn(b_s, b_a)
@@ -80,30 +85,30 @@ def train():
 
                 b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_, b_d_a = M.sample(BATCH_SIZE)
                 if not ASYN_TRAIN_GAN:
-                    generator.learn(b_s, b_d_a, LR_G_list[lr_pointer], b_s_)
-                b_g = generator.predict_batch(b_s, b_d_a)
+                    generator.learn(b_s, b_a, LR_G_list[lr_pointer], b_s_)
+                b_g = generator.predict_batch(b_s, b_a)
                 if not ASYN_TRAIN_GAN:
-                    discriminator.learn(b_g, b_s_, b_s, b_d_a, LR_D_list[lr_pointer])
+                    discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
 
                 # Learn the minibatch
                 # b_curious_r = discriminator.determine_batch(b_s, b_lstm_s, b_a, b_g)
                 A_pred.learn(b_s, b_s_, b_a, LR_A_pred_list[lr_pointer])
-                critic.learn(b_s,b_lstm_s, b_d_a, b_curious_r, b_s_, b_lstm_s_)
+                critic.learn(b_s,b_lstm_s, b_a, b_curious_r, b_s_, b_lstm_s_)
                 actor.learn(b_s, b_lstm_s)
-                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_d_a)
+                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
                 D_loss += one_step_D_loss
-                one_step_G_loss = generator.eval(b_s, b_d_a, b_s_)
+                one_step_G_loss = generator.eval(b_s, b_a, b_s_)
                 G_loss += one_step_G_loss
-                a_pred_loss = A_pred.eval(b_s, b_s_, b_d_a)
+                a_pred_loss = A_pred.eval(b_s, b_s_, b_a)
 
 
                 if t % 10 == 0:
-                    check_real_data = discriminator.check_the_real_data(s, a, s_)
+                    #check_real_data = discriminator.check_the_real_data(s, a, s_)
                     print('Ep:', ep,
                           '| Step:%i' % int(t),
                           '| R: %i' % int(ep_reward),
                           '| Curious_R: %f' % float(short_term_curious_r/10),
-                          '| Real_data_Check: %f' % float(check_real_data),
+                          #'| Real_data_Check: %f' % float(check_real_data),
                           '| Prediction_error: %f' % float(short_term_pred_error/10),
                           '| A_Pred_error: %f' % float(a_pred_loss),
                           '| D loss: %f' % float(one_step_D_loss),
@@ -114,10 +119,10 @@ def train():
                     short_term_curious_r =0
                     short_term_pred_error = 0
 
-                if n_mode==1 and t % 200 == 0:
+                    if n_mode==1 and t % 200 == 0:
                         plt.ion()
-                        plt.imshow(transfer_picture([s_[-1], g[0]]), cmap='gray')
-                        plt.pause(1)
+                        plt.imshow(transfer_picture([s_[:,:,-1], g[:,:,0]]), cmap='gray')
+                        plt.pause(5)
                         plt.close()
 
             s = s_
@@ -127,6 +132,7 @@ def train():
             total_steps += 1
     
             if t == MAX_EP_STEPS - 1 or done or info['life']==0 or info['time']<=1:
+
                 # if done:
                 t = t+1
                 result = '| done' if done else '| ----'
@@ -140,7 +146,7 @@ def train():
                       '| Explore: %.2f' % var,
                       )
                 # plt.ion()
-
+                var = max([var * .99, VAR_MIN])
                 env.close()
 
                 break
@@ -163,56 +169,81 @@ def train():
     ckpt_path = os.path.join('./'+MODE[n_mode], 'Curious_GAN.ckpt')
     save_path = saver.save(sess, ckpt_path, write_meta_graph=False)
     print("\nSave Model %s\n" % save_path)
+
     np.save('J_r.npy', J_r)
+    np.save('J_r.npy', J_Curious)
+    np.save('J_r.npy', J_D_loss)
+    np.save('J_r.npy', J_G_loss)
+    np.save('J_r.npy', J_A_pred_loss)
 
 
 def GAN_pretrain():
     #collect data
     var=2
+
+
+    short_term_curious_r = 0
+    short_term_pred_error = 0
     env = gym.make(env_id)
-    env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=False)
+    env = env_wrapper.BufferedObsEnv(env, n=TIME_STEP, skip=frame_skip, shape=fshape, channel_last=True)
+
     s = env.reset()
-    s = np.expand_dims(s, -1)
+    l_2_loss = 0
     lstm_state = actor.LSTM_unit.get_initial_state()
     lr_pointer = 0
-    for t in range(MAX_EP_STEPS):
-        a = actor.choose_action(s, lstm_state, var)
-        g = generator.predict(s, a)
-        s_, r, done, info, _ = env._step(a)
+    while M.pointer <= MEMORY_CAPACITY:
+        for t in range(MAX_EP_STEPS):
+            a = actor.choose_action(s, lstm_state, var)
+            dense_a = transfer_sparse_action(a)
 
-        curious_r = ITA * discriminator.determine(s, a, g)[0]
-        lstm_state_ = actor.LSTM_unit.get_state(s, lstm_state)
+            s_, r, done, info, _ = env._step(a)
+            g = generator.predict(s, a)
+            curious_r = ITA * discriminator.determine(s, a, g)[0]
+            lstm_state_ = actor.LSTM_unit.get_state(s, lstm_state)
 
-        one_step_l_2_loss = discriminator.observe_and_compare(s_, g, )
-        l_2_loss += one_step_l_2_loss
-        M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_)
-        s = s_
-        lstm_state = lstm_state_
+            one_step_l_2_loss = discriminator.observe_and_compare(s_, g, )
+            l_2_loss += one_step_l_2_loss
+            short_term_pred_error += one_step_l_2_loss
+            short_term_curious_r += curious_r
+            M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_, dense_a)
+            if M.pointer > MEMORY_CAPACITY:
+                break
+            s = s_
+            lstm_state = lstm_state_
 
     for t in range(MAX_PRETRAIN_STEPS):
-        b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_ = M.sample(BATCH_SIZE)
-        generator.learn(b_s, b_a, LR_G_list[lr_pointer])
+
+        if t == LR_DECAY_LIST[min(lr_pointer, len(LR_DECAY_LIST) - 1)]:
+            lr_pointer = min(lr_pointer + 1, len(LR_D_list))
+
+        b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_, b_d_a = M.sample(BATCH_SIZE)
+        generator.learn(b_s, b_a, LR_G_list[lr_pointer], b_s_)
         b_g = generator.predict_batch(b_s, b_a)
 
         discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
         A_pred.learn(b_s, b_s_, b_a, LR_A_pred_list[lr_pointer])
+        one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
+
+        one_step_G_loss = generator.eval(b_s, b_a, b_s_)
+
+        a_pred_loss = A_pred.eval(b_s, b_s_, b_a)
         if t % 10 == 0:
-            one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
-            one_step_G_loss = generator.eval(b_s, b_a)
-            print('Ep:', ep,
+
+            print('step:', t,
                   '| Pre-Training Step:%i' % int(t),
                   '| D loss: %f' % float(one_step_D_loss),
                   '| G loss: %f' % float(one_step_G_loss),
+                  '| A_Pred_error: %f' % float(a_pred_loss)
                   )
 
 
         if n_mode == 1 and t % 200 == 0:
-            plt.close()
+            indice = np.random.choice(BATCH_SIZE, size=1)
             plt.ion()
-            plt.imshow(transfer_picture([b_s_[0,-1], b_g[0,0]]), cmap='gray')
-            # plt.pause(1)
-
-            plt.show()
+            plt.imshow(transfer_picture([b_s_[indice[0],:, :, -1], b_g[indice[0],:, :, 0]]), cmap='gray')
+            plt.pause(5)
+            plt.close()
+    return t
 
 
 
@@ -224,7 +255,7 @@ def transfer_picture(images, mode='L'):
     col=0
     for image in images:
 
-        image1 = image[ :, :, 0]
+        image1 = image
         image1 = (((image1 - image1.min()) * 255) / (image1.max() - image1.min())).astype(np.uint8)
         new_im.paste(Image.fromarray(image1,mode),(col,0))
         col += w
@@ -256,6 +287,8 @@ def build_model():
         R = tf.placeholder(tf.float32, [None, 1], name='r')
     with tf.name_scope('S_'):
         S_ = tf.placeholder(tf.float32, shape=[None, *list(env.observation_space.shape)], name='s_')
+    with tf.name_scope('single_S_'):
+        single_S_ = tf.placeholder(tf.float32, shape=[None, *list(fshape), 1], name='single_s_')
     with tf.name_scope('A'):
         A = tf.placeholder(tf.float32, shape=[None, ACTION_DIM], name='a')
     with tf.name_scope('LR'):
@@ -272,13 +305,14 @@ def build_model():
         A_pred_is_training = tf.placeholder(tf.bool)
 
     with tf.variable_scope('feature_abstraction'):
-        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2,is_training=phi_is_training)
-        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, is_training=False)
-        # observation = universe_feature_abstraction(single_S_, reuse=True, time_step=1, nConvs=2, is_training=False)
+        phis = universe_feature_abstraction(S, time_step=TIME_STEP, nConvs=2, norm=USE_BATCH_NORM, is_training=phi_is_training)
+        phis_ = universe_feature_abstraction(S_, reuse=True, time_step=TIME_STEP, nConvs=2, norm=USE_BATCH_NORM, is_training=False)
+    with tf.variable_scope('single_feature_abstraction'):
+        observation = universe_feature_abstraction(single_S_, reuse=False, time_step=1, nConvs=2, is_training=False, norm=USE_BATCH_NORM)
         # observation = tf.squeeze(observation, 1)
 
 
-    A_pred = StateActionPredictor(S, S_, phis, phis_, A, A_pred_is_training,phi_is_training, l2_weight, LR_A_pred, sess)
+    A_pred = StateActionPredictor(S, S_, phis, phis_, A, A_pred_is_training,phi_is_training, l2_weight, LR_A_pred, sess, MODE[n_mode])
     actor = Actor(sess, ACTION_DIM, LR_A, BATCH_SIZE, REPLACE_ITER_A, phis, phis_, S, S_,
                   phi_is_training, A_is_training, C_is_training, USE_BATCH_NORM, scope='Actor', action_bound=None)
 
@@ -287,19 +321,27 @@ def build_model():
 
     actor.add_grad_to_graph(critic.a_grads)
     M = Memory(capacity=MEMORY_CAPACITY)
-    generator = Generator(sess, ACTION_DIM, LR_G, BATCH_SIZE, actor.a, S,S_, phis, A,
+    generator = Generator(sess, USE_BATCH_NORM, ACTION_DIM, LR_G, BATCH_SIZE, A, S,S_, phis, A,
                           l2_weight, phi_is_training, G_is_training, A_is_training, D_is_training, MODE[n_mode])
     if n_mode == 1:
 
-        with tf.variable_scope('D_feature_abstraction'):
-            fake_observation = universe_feature_abstraction(generator.G, reuse=True, time_step=1, nConvs=2, is_training=False)
-            fake_observation = tf.squeeze(fake_observation, 1)
+        # with tf.variable_scope('feature_abstraction'):
+        #     fake_observation = tf.concat([S[:,:,:,1:], generator.G], axis=-1)
+        #     fake_observation = universe_feature_abstraction(fake_observation, reuse=True, time_step=TIME_STEP,
+        #                                                     norm=USE_BATCH_NORM, nConvs=2, is_training=False)
+        # discriminator = Discriminator(sess, LR_D, S_, S, phis, fake_observation, generator.G, A, phis_,
+        #                               phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE,
+        #                               l2_weight,
+        #                               MODE[n_mode])
+        with tf.variable_scope('single_feature_abstraction'):
 
-        discriminator = Discriminator(sess, LR_D, S_, S, fake_observation, generator.G, actor.a, LSTM_unit, gen_LSTM_unit, observation,
+            fake_observation = universe_feature_abstraction(generator.G, reuse=True, time_step=1,
+                                                                norm=USE_BATCH_NORM, nConvs=2, is_training=False)
+        discriminator = Discriminator(sess, LR_D, S_, S, phis, fake_observation, generator.G, A, observation,
                                   phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight,
                                   MODE[n_mode])
     else:
-        discriminator = Discriminator(sess, LR_D, S_, S, phis, generator.G, generator.G, actor.a,
+        discriminator = Discriminator(sess, LR_D, S_, S, phis, generator.G, generator.G, A,
                                       phis_,
                                       phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE,
                                       l2_weight,
@@ -320,30 +362,30 @@ if __name__ == '__main__':
     TIME_STEP = 4
     MAX_EPISODES = 100
     MAX_EP_STEPS = 4000
-    MAX_PRETRAIN_STEPS = 10000
-    USE_PRETRAIN = False
+    MAX_PRETRAIN_STEPS = 100000
+    USE_PRETRAIN = True
     LR_DECAY_LIST = [14000,50000]
-    LR_D_list = [1e-4, 1e-6, 1e-8]  # learning rate for actor
-    LR_G_list = [1e-4, 1e-6, 1e-8]
-    LR_A_pred_list = [1e-4, 1e-6, 1e-8]# learning rate for critic
+    LR_D_list = [1e-4, 1e-4, 1e-4]  # learning rate for actor
+    LR_G_list = [1e-4, 1e-4, 1e-4]
+    LR_A_pred_list = [1e-4, 1e-4, 1e-4]# learning rate for critic
     LR_A = 1e-4  # learning rate for actor
     LR_C = 1e-4  # learning rate for critic
     GAMMA = 0.99  # reward discount
     l2_weight = 0.01
-    USE_BATCH_NORM = True
+    USE_BATCH_NORM = False
     ASYN_TRAIN_GAN = False
     REPLACE_ITER_A = 1100
     REPLACE_ITER_C = 1000
     ITER_train_G = 10
     ITER_D_Training = 2000
     ITER_G_Training =400
-    MEMORY_CAPACITY = 5000
+    MEMORY_CAPACITY = 1000
     BATCH_SIZE = 32
     VAR_MIN = 1
     RENDER = False
     LOAD = False
     MODE = ['hidden_state', 'full_prediction']
-    n_mode = 0
+    n_mode = 1
     ITA = 1  # Curious coefficient
 
     frame_skip = acRepeat if acRepeat > 0 else 4
@@ -383,8 +425,10 @@ if __name__ == '__main__':
     # else:
     if True:
         if USE_PRETRAIN:
-            GAN_pretrain()
-        train()
+            pretreain_step = GAN_pretrain()
+        else:
+            pretreain_step = 0
+        train(pretreain_step)
 
         tot_samples = np.array(N_vals)
         colors = ['#2D328F', '#F15C19', "#81b13c", "#ca49ac"]
@@ -394,22 +438,9 @@ if __name__ == '__main__':
         linewidth = 1
         markersize = 10
 
-        plt.plot(tot_samples, np.amin(J_r, axis=0), 'o-', color=colors[0], linewidth=linewidth,
-                 markersize=markersize, label='R')
 
-        plt.axis([0, MAX_EPISODES, 0, 800])
-        plt.xlabel('rollouts', fontsize=label_fontsize)
-        plt.ylabel('cost', fontsize=label_fontsize)
-        plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
-        plt.xticks(fontsize=tick_fontsize)
-        plt.yticks(fontsize=tick_fontsize)
-        plt.grid(True)
-        fig = plt.gcf()
-        fig.set_size_inches(9, 6)
 
-        plt.show()
-
-        plt.plot(tot_samples, np.amin(J_Curious, axis=0), 'o-', color=colors[0], linewidth=linewidth,
+        plt.plot(tot_samples, np.amin(J_Curious, axis=0), '-', color=colors[0], linewidth=linewidth,
                  markersize=markersize, label='Curious_r')
 
         plt.axis([0, MAX_EPISODES, -0.5, 0.5])
@@ -424,7 +455,7 @@ if __name__ == '__main__':
 
         plt.show()
 
-        plt.plot(tot_samples, np.amin(J_A_pred_loss, axis=0), 'o-', color=colors[0], linewidth=linewidth,
+        plt.plot(tot_samples, np.amin(J_A_pred_loss, axis=0), '-', color=colors[0], linewidth=linewidth,
                  markersize=markersize, label='A_pred_loss')
 
         plt.axis([0, MAX_EPISODES, 0, 5])
@@ -440,7 +471,7 @@ if __name__ == '__main__':
         plt.show()
 
         plt.plot(tot_samples, np.amin(J_r, axis=0), '-', color=colors[0], linewidth=linewidth,
-                 markersize=markersize, label='Curious_GAN')
+                 markersize=markersize, label='R')
         # plt.plot(tot_samples, np.amin(J_r_DDPG, axis=0), '-', color=colors[1], linewidth=linewidth,
         #          markersize=markersize, label='DDPG')
 
@@ -456,10 +487,10 @@ if __name__ == '__main__':
 
         plt.show()
 
-        plt.plot(tot_samples, np.amin(J_D_loss, axis=0), 'o-', color=colors[0], linewidth=linewidth,
-                 markersize=markersize, label='Curious_r')
+        plt.plot(tot_samples, np.amin(J_D_loss, axis=0), '-', color=colors[0], linewidth=linewidth,
+                 markersize=markersize, label='D_LOSS')
 
-        plt.axis([0, MAX_EPISODES, 0, 1])
+        plt.axis([0, MAX_EPISODES, 0, 10])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
@@ -471,10 +502,10 @@ if __name__ == '__main__':
 
         plt.show()
 
-        plt.plot(tot_samples, np.amin(J_G_loss, axis=0), 'o-', color=colors[0], linewidth=linewidth,
-                 markersize=markersize, label='Curious_r')
+        plt.plot(tot_samples, np.amin(J_G_loss, axis=0), '-', color=colors[0], linewidth=linewidth,
+                 markersize=markersize, label='G_LOSS')
 
-        plt.axis([0, MAX_EPISODES, 0, 1])
+        plt.axis([0, MAX_EPISODES, 0, 10])
         plt.xlabel('rollouts', fontsize=label_fontsize)
         plt.ylabel('cost', fontsize=label_fontsize)
         plt.legend(fontsize=18, bbox_to_anchor=(1.0, 0.54))
