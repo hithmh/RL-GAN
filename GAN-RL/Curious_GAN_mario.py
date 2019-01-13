@@ -88,14 +88,15 @@ def train(pretrain_step = 0):
                     generator.learn(b_s, b_a, LR_G_list[lr_pointer], b_s_)
                 b_g = generator.predict_batch(b_s, b_a)
                 if not ASYN_TRAIN_GAN:
-                    discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
+                    # discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
+                    discriminator.learn(b_g, b_s_[:, :, :, [-1]], b_s, b_a, LR_D_list[lr_pointer])
 
                 # Learn the minibatch
                 # b_curious_r = discriminator.determine_batch(b_s, b_lstm_s, b_a, b_g)
                 A_pred.learn(b_s, b_s_, b_a, LR_A_pred_list[lr_pointer])
                 critic.learn(b_s,b_lstm_s, b_a, b_curious_r, b_s_, b_lstm_s_)
                 actor.learn(b_s, b_lstm_s)
-                one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
+                one_step_D_loss = discriminator.eval(b_g, b_s_[:, :, :, [-1]], b_s, b_a)
                 D_loss += one_step_D_loss
                 one_step_G_loss = generator.eval(b_s, b_a, b_s_)
                 G_loss += one_step_G_loss
@@ -180,7 +181,7 @@ def train(pretrain_step = 0):
 def GAN_pretrain():
     #collect data
     var=2
-
+    HAND_BREAK = False
 
     short_term_curious_r = 0
     short_term_pred_error = 0
@@ -191,7 +192,7 @@ def GAN_pretrain():
     l_2_loss = 0
     lstm_state = actor.LSTM_unit.get_initial_state()
     lr_pointer = 0
-    while M.pointer <= MEMORY_CAPACITY:
+    while pretrain_M.pointer <= PRE_TRAIN_MEMORY_CAPACITY:
         for t in range(MAX_EP_STEPS):
             a = actor.choose_action(s, lstm_state, var)
             dense_a = transfer_sparse_action(a)
@@ -205,8 +206,9 @@ def GAN_pretrain():
             l_2_loss += one_step_l_2_loss
             short_term_pred_error += one_step_l_2_loss
             short_term_curious_r += curious_r
-            M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_, dense_a)
-            if M.pointer > MEMORY_CAPACITY:
+            pretrain_M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_, dense_a)
+            # M.store_transition(s, g, lstm_state, a, r, curious_r, s_, lstm_state_, dense_a)
+            if pretrain_M.pointer > PRE_TRAIN_MEMORY_CAPACITY:
                 break
             s = s_
             lstm_state = lstm_state_
@@ -216,13 +218,13 @@ def GAN_pretrain():
         if t == LR_DECAY_LIST[min(lr_pointer, len(LR_DECAY_LIST) - 1)]:
             lr_pointer = min(lr_pointer + 1, len(LR_D_list))
 
-        b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_, b_d_a = M.sample(BATCH_SIZE)
+        b_s, b_g_old, b_lstm_s, b_a, b_r, b_curious_r, b_s_, b_lstm_s_, b_d_a = pretrain_M.sample(BATCH_SIZE)
         generator.learn(b_s, b_a, LR_G_list[lr_pointer], b_s_)
         b_g = generator.predict_batch(b_s, b_a)
 
-        discriminator.learn(b_g, b_s_, b_s, b_a, LR_D_list[lr_pointer])
+        discriminator.learn(b_g, b_s_[:,:,:,[-1]], b_s, b_a, LR_D_list[lr_pointer])
         A_pred.learn(b_s, b_s_, b_a, LR_A_pred_list[lr_pointer])
-        one_step_D_loss = discriminator.eval(b_g, b_s_, b_s, b_a)
+        one_step_D_loss = discriminator.eval(b_g, b_s_[:,:,:,[-1]], b_s, b_a)
 
         one_step_G_loss = generator.eval(b_s, b_a, b_s_)
 
@@ -235,7 +237,8 @@ def GAN_pretrain():
                   '| G loss: %f' % float(one_step_G_loss),
                   '| A_Pred_error: %f' % float(a_pred_loss)
                   )
-
+        if HAND_BREAK:
+            break
 
         if n_mode == 1 and t % 200 == 0:
             indice = np.random.choice(BATCH_SIZE, size=1)
@@ -320,8 +323,9 @@ def build_model():
                     phi_is_training, C_is_training, A_is_training, USE_BATCH_NORM)
 
     actor.add_grad_to_graph(critic.a_grads)
+
     M = Memory(capacity=MEMORY_CAPACITY)
-    generator = Generator(sess, USE_BATCH_NORM, ACTION_DIM, LR_G, BATCH_SIZE, A, S,S_, phis, A,
+    generator = Generator(sess, USE_BATCH_NORM, ACTION_DIM, LR_G, BATCH_SIZE, A, S,S_, single_S_, phis, A,
                           l2_weight, phi_is_training, G_is_training, A_is_training, D_is_training, MODE[n_mode])
     if n_mode == 1:
 
@@ -337,7 +341,7 @@ def build_model():
 
             fake_observation = universe_feature_abstraction(generator.G, reuse=True, time_step=1,
                                                                 norm=USE_BATCH_NORM, nConvs=2, is_training=False)
-        discriminator = Discriminator(sess, LR_D, S_, S, phis, fake_observation, generator.G, A, observation,
+        discriminator = Discriminator(sess, LR_D, single_S_, S, phis, fake_observation, generator.G, A, observation,
                                   phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE, l2_weight,
                                   MODE[n_mode])
     else:
@@ -346,13 +350,18 @@ def build_model():
                                       phi_is_training, G_is_training, A_is_training, D_is_training, BATCH_SIZE,
                                       l2_weight,
                                       MODE[n_mode])
-    generator.model_loss(discriminator.unscaled_D_fake, phis_)
-    return actor, critic, generator, discriminator, M, A_pred
+    generator.model_loss(discriminator.unscaled_D_fake, fake_observation, observation)
+    if USE_PRETRAIN:
+        pretrain_M = Memory(capacity=PRE_TRAIN_MEMORY_CAPACITY)
+        return actor, critic, generator, discriminator, M, A_pred, pretrain_M
+    else:
+        return actor, critic, generator, discriminator, M, A_pred
 
 
 
 
 if __name__ == '__main__':
+
     env_id = 'ppaquette/SuperMarioBros-1-1-v0'
     smooth = 0
     np.random.seed(1)
@@ -362,11 +371,11 @@ if __name__ == '__main__':
     TIME_STEP = 4
     MAX_EPISODES = 100
     MAX_EP_STEPS = 4000
-    MAX_PRETRAIN_STEPS = 100000
-    USE_PRETRAIN = True
-    LR_DECAY_LIST = [14000,50000]
-    LR_D_list = [1e-4, 1e-4, 1e-4]  # learning rate for actor
-    LR_G_list = [1e-4, 1e-4, 1e-4]
+    MAX_PRETRAIN_STEPS = 40000
+    USE_PRETRAIN = False
+    LR_DECAY_LIST = [50000,100000]
+    LR_D_list = [1e-4, 1e-6, 1e-6]  # learning rate for actor
+    LR_G_list = [1e-4, 1e-6, 1e-6]
     LR_A_pred_list = [1e-4, 1e-4, 1e-4]# learning rate for critic
     LR_A = 1e-4  # learning rate for actor
     LR_C = 1e-4  # learning rate for critic
@@ -379,7 +388,8 @@ if __name__ == '__main__':
     ITER_train_G = 10
     ITER_D_Training = 2000
     ITER_G_Training =400
-    MEMORY_CAPACITY = 1000
+    PRE_TRAIN_MEMORY_CAPACITY = 1000
+    MEMORY_CAPACITY = 5000
     BATCH_SIZE = 32
     VAR_MIN = 1
     RENDER = False
@@ -399,8 +409,11 @@ if __name__ == '__main__':
     ACTION_DIM = env.action_space.shape
 
     sess = tf.Session()
+    if USE_PRETRAIN:
+        actor, critic, generator, discriminator, M, A_pred, pretrain_M = build_model()
+    else:
+        actor, critic, generator, discriminator, M, A_pred = build_model()
 
-    actor, critic, generator, discriminator, M, A_pred= build_model()
 
     saver = tf.train.Saver()
     path = './' + MODE[n_mode]
